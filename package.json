@@ -1,0 +1,69 @@
+{
+  "name": "prisma-ra-tls",
+  "version": "0.1.0",
+  "description": "Prisma driver adapter for RA-TLS secured TEE-hosted Postgres with TDX attestation verification via Intel Trust Authority",
+  "license": "Apache-2.0",
+  "author": "TeeSQL",
+  "homepage": "https://github.com/TeeSQL/prisma-ra-tls",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TeeSQL/prisma-ra-tls.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TeeSQL/prisma-ra-tls/issues"
+  },
+  "keywords": [
+    "prisma",
+    "ra-tls",
+    "tdx",
+    "tee",
+    "attestation",
+    "confidential-computing",
+    "postgres",
+    "dstack",
+    "intel-tdx"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm run typecheck"
+  },
+  "dependencies": {
+    "@peculiar/x509": "^2.0.0",
+    "jose": "^5.0.0"
+  },
+  "peerDependencies": {
+    "@prisma/adapter-pg": ">=5.10.0",
+    "pg": ">=8.0.0"
+  },
+  "devDependencies": {
+    "@prisma/adapter-pg": "^6.0.0",
+    "@prisma/driver-adapter-utils": "^6.0.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.0.0",
+    "pg": "^8.13.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
