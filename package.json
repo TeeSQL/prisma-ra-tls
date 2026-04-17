@@ -43,6 +43,7 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "prepublishOnly": "npm run build && npm run typecheck"
   },
   "dependencies": {
@@ -58,7 +59,9 @@
     "@prisma/driver-adapter-utils": "^6.0.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.0.0",
+    "@vitest/coverage-v8": "^3.2.4",
     "pg": "^8.13.0",
+    "reflect-metadata": "^0.2.2",
     "tsup": "^8.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

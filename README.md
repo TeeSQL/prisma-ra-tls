@@ -57,11 +57,12 @@ const adapter = await withRaTls(process.env.DATABASE_URL!, {
 export const prisma = new PrismaClient({ adapter })
 ```
 
-Set the environment variable:
+Set the environment variables:
 
 ```bash
 INTEL_TRUST_AUTHORITY_API_KEY=your-api-key
-DATABASE_URL=postgres://postgres@your-cluster.phala.network:5433/postgres
+# Use teesql_read or teesql_readwrite as username, cluster secret as password
+DATABASE_URL=postgres://teesql_readwrite:your-32-byte-hex-secret@your-cluster:5433/postgres
 ```
 
 ## Options

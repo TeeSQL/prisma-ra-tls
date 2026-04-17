@@ -11,16 +11,18 @@ const OID_ATTESTATION = "1.3.6.1.4.1.62397.1.8"; // SCALE-encoded VersionedAttes
  * dstack encodes extension payloads as DER OCTET STRING { payload }, so
  * after @peculiar/x509 unwraps the outer extnValue OCTET STRING, we still
  * need to strip one more DER OCTET STRING tag+length to reach the raw bytes.
+ *
+ * @internal exported for testing
  */
-function stripOctetStringWrapper(der: Buffer): Buffer {
+export function _stripOctetStringWrapper(der: Buffer): Buffer {
   if (der.length < 2 || der[0] !== 0x04) {
-    // No wrapper — return as-is (defensive)
+    // Not a DER OCTET STRING — return as-is (defensive)
     return der;
   }
   let offset = 1;
+  // Safe: der.length >= 2 is guaranteed by the check above
+  const firstLenByte = der[offset] as number;
   let length: number;
-  const firstLenByte = der[offset];
-  if (firstLenByte === undefined) throw new Error("Truncated OCTET STRING");
   if (firstLenByte < 0x80) {
     length = firstLenByte;
     offset++;
@@ -30,7 +32,7 @@ function stripOctetStringWrapper(der: Buffer): Buffer {
     length = 0;
     for (let i = 0; i < numLenBytes; i++) {
       const b = der[offset + i];
-      if (b === undefined) throw new Error("Truncated OCTET STRING length");
+      if (b === undefined) throw new Error("Truncated OCTET STRING length field");
       length = (length << 8) | b;
     }
     offset += numLenBytes;
@@ -60,9 +62,9 @@ export function extractTdxQuote(derCert: Buffer): Buffer | null {
   const legacyExt = cert.getExtension(OID_TDX_QUOTE);
   if (legacyExt) {
     try {
-      return stripOctetStringWrapper(Buffer.from(legacyExt.value));
+      return _stripOctetStringWrapper(Buffer.from(legacyExt.value));
     } catch {
-      // fall through
+      // Malformed extension value — fall through to current OID
     }
   }
 
@@ -72,12 +74,12 @@ export function extractTdxQuote(derCert: Buffer): Buffer | null {
   const currentExt = cert.getExtension(OID_ATTESTATION);
   if (currentExt) {
     try {
-      const payload = stripOctetStringWrapper(Buffer.from(currentExt.value));
+      const payload = _stripOctetStringWrapper(Buffer.from(currentExt.value));
       if (payload.length > 1 && payload[0] === 0x00) {
         return payload.subarray(1);
       }
     } catch {
-      // fall through
+      // Malformed extension value — fall through
     }
   }
 
