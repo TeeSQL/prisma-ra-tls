@@ -40,11 +40,23 @@ vi.mock("net", () => ({
 import { getDstackClientCert } from "../src/dstack.js";
 import { createConnection } from "net";
 
-const VALID_RESPONSE = JSON.stringify({ key: "-----BEGIN KEY-----", cert: "-----BEGIN CERT-----" });
+const LEAF_PEM = "-----BEGIN LEAF-----";
+const INTERMEDIATE_PEM = "-----BEGIN INTER-----";
+const CHAIN_RESPONSE = JSON.stringify({
+  key: "-----BEGIN KEY-----",
+  certificate_chain: [LEAF_PEM, INTERMEDIATE_PEM],
+});
+const LEGACY_RESPONSE = JSON.stringify({
+  key: "-----BEGIN KEY-----",
+  cert: "-----BEGIN CERT-----",
+});
 
-function emitSuccessfulResponse(body: string = VALID_RESPONSE): void {
+function emitResponse(body: string): void {
   mockSocket.emit("connect");
-  mockSocket.emit("data", Buffer.from(`HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n${body}`));
+  mockSocket.emit(
+    "data",
+    Buffer.from(`HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n${body}`)
+  );
   mockSocket.emit("end");
 }
 
@@ -66,32 +78,99 @@ afterEach(() => {
 describe("getDstackClientCert — Unix socket", () => {
   it("connects to the default socket path", async () => {
     const promise = getDstackClientCert();
-    emitSuccessfulResponse();
+    emitResponse(CHAIN_RESPONSE);
     await promise;
     expect(createConnection).toHaveBeenCalledWith("/var/run/dstack.sock");
   });
 
   it("connects to a custom socket path", async () => {
     const promise = getDstackClientCert("/custom/dstack.sock");
-    emitSuccessfulResponse();
+    emitResponse(CHAIN_RESPONSE);
     await promise;
     expect(createConnection).toHaveBeenCalledWith("/custom/dstack.sock");
   });
 
-  it("returns key and cert buffers on success", async () => {
+  it("returns key, leaf cert, and joined chain on success", async () => {
     const promise = getDstackClientCert();
-    emitSuccessfulResponse();
-    const { key, cert } = await promise;
+    emitResponse(CHAIN_RESPONSE);
+    const { key, cert, certChainPem } = await promise;
+    expect(key.toString()).toBe("-----BEGIN KEY-----");
+    expect(cert.toString()).toBe(LEAF_PEM);
+    expect(certChainPem).toContain(LEAF_PEM);
+    expect(certChainPem).toContain(INTERMEDIATE_PEM);
+    expect(certChainPem.endsWith("\n")).toBe(true);
+  });
+
+  it("falls back to legacy `cert` field when certificate_chain absent", async () => {
+    const promise = getDstackClientCert();
+    emitResponse(LEGACY_RESPONSE);
+    const { key, cert, certChainPem } = await promise;
     expect(key.toString()).toBe("-----BEGIN KEY-----");
     expect(cert.toString()).toBe("-----BEGIN CERT-----");
+    expect(certChainPem.endsWith("\n")).toBe(true);
+  });
+
+  it("rejects when both certificate_chain and cert are missing", async () => {
+    const promise = getDstackClientCert();
+    emitResponse(JSON.stringify({ key: "k" }));
+    await expect(promise).rejects.toThrow("missing certificate_chain");
+  });
+
+  it("preserves trailing newline in chain when last cert already ends with one", async () => {
+    const promise = getDstackClientCert();
+    const body = JSON.stringify({
+      key: "k",
+      certificate_chain: ["leaf\n", "intermediate\n"],
+    });
+    emitResponse(body);
+    const { certChainPem } = await promise;
+    // chain.join("\n") on ["leaf\n", "intermediate\n"] yields
+    // "leaf\n\nintermediate\n" which already ends with "\n", so the
+    // "already ends with newline" branch returns it as-is.
+    expect(certChainPem).toBe("leaf\n\nintermediate\n");
+  });
+
+  it("preserves trailing newline in legacy cert PEM when present", async () => {
+    const promise = getDstackClientCert();
+    emitResponse(JSON.stringify({ key: "k", cert: "single-cert\n" }));
+    const { certChainPem } = await promise;
+    expect(certChainPem).toBe("single-cert\n");
   });
 
   it("writes an HTTP POST to the socket on connect", async () => {
     const promise = getDstackClientCert();
-    emitSuccessfulResponse();
+    emitResponse(CHAIN_RESPONSE);
     await promise;
     expect(mockSocket.written[0]).toContain("POST /GetTlsKey HTTP/1.1");
     expect(mockSocket.written[0]).toContain("Content-Type: application/json");
+  });
+
+  it("sends usage_ra_tls/server_auth/client_auth flags", async () => {
+    const promise = getDstackClientCert(undefined, {
+      usageRaTls: true,
+      usageClientAuth: true,
+    });
+    emitResponse(CHAIN_RESPONSE);
+    await promise;
+    const written = mockSocket.written[0] ?? "";
+    const sep = written.indexOf("\r\n\r\n");
+    const body = written.slice(sep + 4);
+    const parsed = JSON.parse(body);
+    expect(parsed.usage_ra_tls).toBe(true);
+    expect(parsed.usage_client_auth).toBe(true);
+    expect(parsed.usage_server_auth).toBe(true);
+  });
+
+  it("includes alt_names when provided", async () => {
+    const promise = getDstackClientCert(undefined, {
+      altNames: ["foo", "bar"],
+    });
+    emitResponse(CHAIN_RESPONSE);
+    await promise;
+    const written = mockSocket.written[0] ?? "";
+    const sep = written.indexOf("\r\n\r\n");
+    const parsed = JSON.parse(written.slice(sep + 4));
+    expect(parsed.alt_names).toEqual(["foo", "bar"]);
   });
 
   it("rejects when response has no \\r\\n\\r\\n separator (malformed HTTP)", async () => {
@@ -125,7 +204,7 @@ describe("getDstackClientCert — Unix socket", () => {
 
   it("accumulates data across multiple chunks", async () => {
     const promise = getDstackClientCert();
-    const full = `HTTP/1.1 200 OK\r\n\r\n${VALID_RESPONSE}`;
+    const full = `HTTP/1.1 200 OK\r\n\r\n${CHAIN_RESPONSE}`;
     mockSocket.emit("connect");
     mockSocket.emit("data", Buffer.from(full.slice(0, 10)));
     mockSocket.emit("data", Buffer.from(full.slice(10)));
@@ -146,12 +225,15 @@ describe("getDstackClientCert — simulator", () => {
       "fetch",
       vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => ({ key: "sim-key", cert: "sim-cert" }),
+        json: async () => ({
+          key: "sim-key",
+          certificate_chain: ["sim-leaf", "sim-inter"],
+        }),
       })
     );
     const { key, cert } = await getDstackClientCert();
     expect(key.toString()).toBe("sim-key");
-    expect(cert.toString()).toBe("sim-cert");
+    expect(cert.toString()).toBe("sim-leaf");
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       "http://localhost:8090/GetTlsKey",
       expect.anything()
@@ -167,5 +249,18 @@ describe("getDstackClientCert — simulator", () => {
       vi.fn().mockResolvedValue({ ok: false, status: 500 })
     );
     await expect(getDstackClientCert()).rejects.toThrow("500");
+  });
+
+  it("simulator falls back to legacy cert field", async () => {
+    process.env["DSTACK_SIMULATOR_ENDPOINT"] = "http://localhost:8090";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ key: "sim-key", cert: "sim-leaf" }),
+      })
+    );
+    const { cert } = await getDstackClientCert();
+    expect(cert.toString()).toBe("sim-leaf");
   });
 });

@@ -12,6 +12,7 @@ vi.mock("../src/dstack.js", () => ({
   getDstackClientCert: vi.fn().mockResolvedValue({
     key: Buffer.from("client-key"),
     cert: Buffer.from("client-cert"),
+    certChainPem: "client-cert\n",
   }),
 }));
 

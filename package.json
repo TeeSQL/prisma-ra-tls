@@ -1,6 +1,6 @@
 {
   "name": "prisma-ra-tls",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Prisma driver adapter for RA-TLS secured TEE-hosted Postgres with TDX attestation verification via Intel Trust Authority",
   "license": "Apache-2.0",
   "author": "TeeSQL",

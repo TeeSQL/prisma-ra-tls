@@ -1,5 +1,22 @@
 export { withRaTls } from "./adapter.js";
-export { withRaTlsManifest, resolveLeader } from "./connect-manifest.js";
+export {
+  connectViaManifest,
+  resolveLeader,
+  withRaTlsManifest,
+  type ConnectViaManifestOptions,
+  type ManifestConnection,
+} from "./connect-manifest.js";
+export {
+  openLocalForwarder,
+  rewriteDsnToForwarder,
+  type OpenForwarderOptions,
+} from "./connect.js";
+export {
+  RaTlsForwarder,
+  registerForwarder,
+  registeredForwarders,
+  type RaTlsForwarderOptions,
+} from "./forwarder.js";
 export {
   type Manifest,
   ManifestError,

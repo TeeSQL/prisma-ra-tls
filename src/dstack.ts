@@ -3,8 +3,56 @@ import { createConnection } from "net";
 const DEFAULT_SOCKET = "/var/run/dstack.sock";
 
 interface TlsKeyResponse {
-  key: string; // PEM-encoded private key
-  cert: string; // PEM-encoded RA-TLS certificate (contains TDX quote)
+  /** PEM-encoded private key. */
+  key: string;
+  /**
+   * PEM-encoded RA-TLS certificate chain. The leaf is index 0; intermediates
+   * (KMS-signed app cert, OS image cert, root CA) follow. The dstack guest
+   * agent always returns this field — older releases also returned a single
+   * concatenated ``cert`` field, which we tolerate for backward compatibility.
+   */
+  certificate_chain?: string[];
+  /**
+   * Legacy single-cert field. dstack guest-agent versions before mid-2024
+   * returned this instead of ``certificate_chain``. Deprecated; new SDK
+   * builds prefer ``certificate_chain`` when both are present.
+   */
+  cert?: string;
+}
+
+/**
+ * Options for {@link getDstackClientCert}.
+ *
+ * The dstack guest agent's ``/GetTlsKey`` endpoint accepts these fields,
+ * which control what kind of cert the agent issues:
+ *
+ * - ``usageRaTls``: include the TDX attestation extension. Required for
+ *   mutual RA-TLS where the server checks the client's quote.
+ * - ``usageServerAuth``: cert is valid for TLS server authentication.
+ * - ``usageClientAuth``: cert is valid for TLS client authentication.
+ *   Required for mutual RA-TLS where this process is the *client*.
+ */
+export interface DstackTlsKeyOptions {
+  usageRaTls?: boolean;
+  usageServerAuth?: boolean;
+  usageClientAuth?: boolean;
+  subject?: string;
+  altNames?: string[];
+}
+
+/**
+ * Result of {@link getDstackClientCert}.
+ *
+ * - ``key``: PEM-encoded private key (Buffer).
+ * - ``cert``: leaf cert PEM (Buffer). Backwards-compatible with prior
+ *   v0.2.x callers.
+ * - ``certChainPem``: full chain joined with ``\n`` (string). New in
+ *   v0.3.0; consume in the forwarder for mutual RA-TLS handshakes.
+ */
+export interface DstackClientCert {
+  key: Buffer;
+  cert: Buffer;
+  certChainPem: string;
 }
 
 /**
@@ -20,25 +68,67 @@ interface TlsKeyResponse {
  * @throws if the guest agent socket is not available or returns an error.
  */
 export async function getDstackClientCert(
-  socketPath: string = DEFAULT_SOCKET
-): Promise<{ key: Buffer; cert: Buffer }> {
+  socketPath: string = DEFAULT_SOCKET,
+  options: DstackTlsKeyOptions = {}
+): Promise<DstackClientCert> {
   const simulatorEndpoint = process.env["DSTACK_SIMULATOR_ENDPOINT"];
   if (simulatorEndpoint) {
-    return fetchFromSimulator(simulatorEndpoint);
+    return fetchFromSimulator(simulatorEndpoint, options);
   }
-  return fetchFromSocket(socketPath);
+  return fetchFromSocket(socketPath, options);
+}
+
+function buildPayload(options: DstackTlsKeyOptions): string {
+  const body: Record<string, unknown> = {
+    subject: options.subject ?? "",
+    usage_ra_tls: options.usageRaTls ?? false,
+    usage_server_auth: options.usageServerAuth ?? true,
+    usage_client_auth: options.usageClientAuth ?? false,
+  };
+  if (options.altNames && options.altNames.length > 0) {
+    body["alt_names"] = options.altNames;
+  }
+  return JSON.stringify(body);
+}
+
+function normalizeResponse(parsed: TlsKeyResponse): DstackClientCert {
+  // Prefer certificate_chain when present (current dstack release shape).
+  // Fall back to ``cert`` for older simulator builds.
+  const chain = parsed.certificate_chain;
+  if (chain && chain.length > 0) {
+    const joined = chain.join("\n").endsWith("\n")
+      ? chain.join("\n")
+      : `${chain.join("\n")}\n`;
+    return {
+      key: Buffer.from(parsed.key, "utf8"),
+      cert: Buffer.from(chain[0] ?? "", "utf8"),
+      certChainPem: joined,
+    };
+  }
+  if (parsed.cert) {
+    return {
+      key: Buffer.from(parsed.key, "utf8"),
+      cert: Buffer.from(parsed.cert, "utf8"),
+      certChainPem: parsed.cert.endsWith("\n")
+        ? parsed.cert
+        : `${parsed.cert}\n`,
+    };
+  }
+  throw new Error(
+    "dstack guest agent: response missing certificate_chain and cert"
+  );
 }
 
 async function fetchFromSocket(
-  socketPath: string
-): Promise<{ key: Buffer; cert: Buffer }> {
+  socketPath: string,
+  options: DstackTlsKeyOptions
+): Promise<DstackClientCert> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     const chunks: Buffer[] = [];
 
     socket.on("connect", () => {
-      // Minimal HTTP/1.1 request over Unix domain socket
-      const body = "{}";
+      const body = buildPayload(options);
       socket.write(
         `POST /GetTlsKey HTTP/1.1\r\n` +
           `Host: localhost\r\n` +
@@ -54,7 +144,6 @@ async function fetchFromSocket(
 
     socket.on("end", () => {
       const raw = Buffer.concat(chunks).toString("utf8");
-      // Split HTTP headers from body
       const separator = raw.indexOf("\r\n\r\n");
       if (separator === -1) {
         return reject(new Error("dstack guest agent: malformed HTTP response"));
@@ -62,10 +151,7 @@ async function fetchFromSocket(
       const jsonBody = raw.slice(separator + 4);
       try {
         const parsed = JSON.parse(jsonBody) as TlsKeyResponse;
-        resolve({
-          key: Buffer.from(parsed.key, "utf8"),
-          cert: Buffer.from(parsed.cert, "utf8"),
-        });
+        resolve(normalizeResponse(parsed));
       } catch (err) {
         reject(
           new Error(`dstack guest agent: failed to parse response: ${err}`)
@@ -82,21 +168,22 @@ async function fetchFromSocket(
       );
     });
 
-    socket.setTimeout(5_000, () => {
+    socket.setTimeout(60_000, () => {
       socket.destroy();
-      reject(new Error("dstack guest agent: connection timed out after 5s"));
+      reject(new Error("dstack guest agent: connection timed out after 60s"));
     });
   });
 }
 
 async function fetchFromSimulator(
-  endpoint: string
-): Promise<{ key: Buffer; cert: Buffer }> {
+  endpoint: string,
+  options: DstackTlsKeyOptions
+): Promise<DstackClientCert> {
   const res = await fetch(`${endpoint}/GetTlsKey`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: "{}",
-    signal: AbortSignal.timeout(5_000),
+    body: buildPayload(options),
+    signal: AbortSignal.timeout(60_000),
   });
   if (!res.ok) {
     throw new Error(
@@ -104,8 +191,5 @@ async function fetchFromSimulator(
     );
   }
   const data = (await res.json()) as TlsKeyResponse;
-  return {
-    key: Buffer.from(data.key, "utf8"),
-    cert: Buffer.from(data.cert, "utf8"),
-  };
+  return normalizeResponse(data);
 }

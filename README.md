@@ -27,7 +27,7 @@ npm install pg @prisma/adapter-pg
 
 Requires Node.js ≥ 18, Prisma ≥ 5.10.
 
-## Setup
+## Setup (v0.3.0+)
 
 ### 1. Enable driver adapters in your Prisma schema
 
@@ -38,32 +38,89 @@ generator client {
 }
 ```
 
-### 2. Get an Intel Trust Authority API key
+### 2. Use `connectViaManifest` (recommended)
 
-Register at [portal.trustauthority.intel.com](https://portal.trustauthority.intel.com). The service is free.
-
-### 3. Use the adapter
+The cluster publishes a signed DNS TXT manifest at
+`_teesql-leader.<your-cluster-domain>`; the SDK reads it, verifies the
+signature against your manifest-signer key, and stands up an in-process
+RA-TLS forwarder pointing at the current leader. You hand the resulting
+localhost DSN to `PrismaPg`:
 
 ```ts
+import { hexToBytes } from "@noble/hashes/utils"
 import { PrismaClient } from "@prisma/client"
-import { withRaTls, IntelApiVerifier } from "prisma-ra-tls"
+import { PrismaPg } from "@prisma/adapter-pg"
+import { connectViaManifest, NoopVerifier } from "prisma-ra-tls"
 
-const adapter = await withRaTls(process.env.DATABASE_URL!, {
-  verifier: new IntelApiVerifier(),
-  // Optional: pin the expected TD measurement (hex, from your CVM image build)
-  allowedMrTd: [process.env.EXPECTED_MRTD],
-})
+const { dsn } = await connectViaManifest(
+  process.env.TEESQL_CLUSTER_DOMAIN!,                       // e.g. "62e509856e.teesql.com"
+  process.env.DATABASE_URL!,                                // template DSN, host:port replaced
+  hexToBytes(process.env.TEESQL_MANIFEST_SIGNER!.slice(2)), // 20-byte signer addr
+  { verifier: new NoopVerifier(), allowSimulator: false },
+)
 
+const adapter = new PrismaPg({ connectionString: dsn })
 export const prisma = new PrismaClient({ adapter })
 ```
 
 Set the environment variables:
 
 ```bash
-INTEL_TRUST_AUTHORITY_API_KEY=your-api-key
-# Use teesql_read or teesql_readwrite as username, cluster secret as password
-DATABASE_URL=postgres://teesql_readwrite:your-32-byte-hex-secret@your-cluster:5433/postgres
+# Cluster operator-owned domain — the DNS TXT manifest lives at
+#   _teesql-leader.<TEESQL_CLUSTER_DOMAIN>
+TEESQL_CLUSTER_DOMAIN=62e509856e.teesql.com
+
+# 20-byte ethereum-style address of the manifest-signer key, baked into your app
+TEESQL_MANIFEST_SIGNER=0xa4021ec2acf639899d7f8fd77e8990e73551c3aa
+
+# DSN template; host:port is overwritten with the verified leader_url.
+# Use teesql_read or teesql_readwrite as username; password is replaced by
+# the sidecar with the KMS-derived credential, so the value here is just a
+# placeholder.
+DATABASE_URL=postgres://teesql_readwrite:placeholder@example:5433/postgres
 ```
+
+### Why a forwarder?
+
+The dstack gateway routes by SNI parsed from the first bytes of the
+TCP stream. node-postgres opens every `sslmode=require` connection
+with the postgres-specific `SSLRequest` 8-byte plaintext preamble,
+which the gateway can't recognize as a TLS ClientHello (first byte
+`0x00` ≠ `0x16`), so the connection is closed before any cert exchange
+happens. `connectViaManifest()` works around this by terminating
+mutual RA-TLS in a localhost forwarder inside your own process — the
+plaintext segment never crosses a process boundary.
+
+### Mutual RA-TLS (server verifies you, too)
+
+`connectViaManifest()` always presents a TDX-attested client cert
+fetched from the dstack guest agent (`/var/run/dstack.sock`). The
+sidecar verifies the client's quote and rejects connections from
+non-TEE clients. Make sure your application is itself running inside a
+dstack CVM.
+
+For local dev, set `DSTACK_SIMULATOR_ENDPOINT` and the SDK will
+delegate cert issuance to the simulator.
+
+### Legacy single-endpoint usage (no DNS TXT manifest)
+
+If you already know the leader's host:port and don't want the
+DNS-TXT-based discovery, the older `withRaTls(dsn, options)` adapter
+is still exported as a convenience wrapper around node-postgres'
+in-driver TLS. **Note:** that path opens a single direct connection
+without the forwarder, so it does not work through dstack's
+TLS-passthrough gateway. Prefer `connectViaManifest` for any deploy
+that hits the cluster via the gateway.
+
+### Get an Intel Trust Authority API key (optional, for `IntelApiVerifier`)
+
+Register at [portal.trustauthority.intel.com](https://portal.trustauthority.intel.com). The service is free.
+
+`IntelApiVerifier` validates the upstream server's TDX quote against
+Intel's hosted attestation service. For operator-side scripts the
+cluster's signed DNS TXT manifest is the trust anchor for the leader
+URL; you can pair it with `NoopVerifier` until the JS-side DCAP
+verifier ships (see CHANGELOG for the migration plan).
 
 ## Options
 
@@ -194,9 +251,14 @@ The TLS public key is bound to the quote via the `REPORTDATA` field, preventing 
 
 ## Roadmap
 
-- [ ] v1.1: Full SCALE decode for `PHALA_RATLS_ATTESTATION` OID (`1.3.6.1.4.1.62397.1.8`)
-- [ ] v1.2: Local DCAP binary verifier (air-gapped deployments)
-- [ ] v1.3: Event log (RTMR replay) verification
+- [x] v0.2: DNS TXT manifest discovery for endpoint-registry v2
+- [x] v0.3: Localhost RA-TLS forwarder (gateway-compatible mutual RA-TLS)
+- [ ] v0.4: First-class JS DCAP verifier (replaces `NoopVerifier` /
+  Intel Trust Authority dependency for the upstream-quote check; tracked
+  in the platform-wide
+  [DCAP migration plan](../../docs/plans/mutual-ra-tls-dcap-migration.md))
+- [ ] v1.0: API stabilisation; remove deprecated `withRaTlsManifest`
+- [ ] v1.x: Event log (RTMR replay) verification
 - [ ] v2.0: AMD SEV-SNP support
 
 ## License
