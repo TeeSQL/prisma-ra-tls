@@ -1,3 +1,9 @@
+// `@peculiar/x509` (transitively, `tsyringe`) requires the
+// `reflect-metadata` polyfill be loaded once before any of its modules
+// initialise. We import it here so consumers get a ready-to-use
+// package without having to add the polyfill to their entry point.
+import "reflect-metadata";
+
 export { withRaTls } from "./adapter.js";
 export {
   connectViaManifest,
